@@ -1,4 +1,4 @@
-# PC-TAB and PC-TABD
+# PC-TAB
 
 **PC-TAB** is a physically controllable framework for motion blur synthesis. It turns ordinary sharp video into realistic blurred data and stores the per-pixel motion trajectories that produced each blur.
 
