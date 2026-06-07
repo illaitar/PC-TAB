@@ -59,6 +59,11 @@ def _smooth_walk_path(
     return (p / m).to(dtype)
 
 
+def _perpendicular(flow: torch.Tensor) -> torch.Tensor:
+    """Perpendicular 2D direction: (x, y) -> (-y, x)."""
+    return torch.stack([-flow[..., 1], flow[..., 0]], dim=-1)
+
+
 def rotate_vectors_2d(vectors: torch.Tensor, angle_deg: float) -> torch.Tensor:
     """Rotate 2D vectors by angle in degrees.
     
@@ -135,12 +140,9 @@ def camera_motion(
         base_flow = 0.5 * (flow_fwd - flow_bwd)  # [B, 2, H, W]
         base_flow = base_flow.permute(0, 2, 3, 1)  # [B, H, W, 2]
     
-    # Fix (3): Depth parallax only when rigid is SE(3)+depth (pose). Homography is 2D approx; 1/depth = fake parallax.
-    from_pose = getattr(params, "_camera_from_pose", False)
-    if from_pose:
-        z_scale = (1.0 / (depth + 1e-3)).clamp(max=5.0).permute(0, 2, 3, 1)  # [B, H, W, 1]
-    else:
-        z_scale = torch.ones(B, H, W, 1, device=depth.device, dtype=depth.dtype)
+    # SE(3)+depth camera flow is already depth-dependent. Homography/fallback
+    # flows are 2D approximations, so do not invent extra inverse-depth parallax.
+    z_scale = torch.ones(B, H, W, 1, device=depth.device, dtype=depth.dtype)
     cam_scale = params.camera_translation_scale * params.depth_parallax_scale
     scaled_flow = base_flow * cam_scale * z_scale  # [B, H, W, 2]
     
@@ -193,6 +195,9 @@ def camera_motion(
             factor = t_eff
 
         disp = scaled_flow * factor.unsqueeze(-1)
+        lateral = getattr(params, "lateral_acceleration", 0.0)
+        if lateral != 0:
+            disp = disp + 0.5 * lateral * (t_eff ** 2).unsqueeze(-1) * _perpendicular(scaled_flow)
         traj.append(disp)
 
     return torch.stack(traj, dim=1)
@@ -292,6 +297,9 @@ def object_motion(
                 factor = t_eff
 
             disp = scaled_flow * factor.unsqueeze(-1)
+            lateral = getattr(params, "lateral_acceleration", 0.0)
+            if lateral != 0:
+                disp = disp + 0.5 * lateral * (t_eff ** 2).unsqueeze(-1) * _perpendicular(scaled_flow)
             mask_disp = disp * mask_expanded
             mask_traj.append(mask_disp)
 

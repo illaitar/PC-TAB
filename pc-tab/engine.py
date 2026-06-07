@@ -20,6 +20,7 @@ from .camera_extractor import (
     extract_homography_from_frames,
     homography_to_motion_field,
     pose_to_motion_field,
+    estimate_se3_from_flow_depth,
 )
 
 
@@ -112,13 +113,30 @@ class SIN3DEngine:
             flow_fwd = flow_fwd.unsqueeze(0)
         if flow_bwd.dim() == 3:
             flow_bwd = flow_bwd.unsqueeze(0)
+        if depth.dim() == 2:
+            depth = depth.unsqueeze(0).unsqueeze(0)
+        elif depth.dim() == 3:
+            depth = depth.unsqueeze(0) if depth.shape[0] == 1 else depth.unsqueeze(1)
+        elif depth.dim() == 4 and depth.shape[1] != 1:
+            depth = depth[:, :1]
         
-        # Extract camera motion: pose (DA3) when camera_model=se3, else homography
-        use_pose = (
-            getattr(self.cfg, "camera_model", "homography") == "se3"
-            and extrinsics is not None
-            and intrinsics is not None
-        )
+        diagnostics = {}
+        camera_model = getattr(self.cfg, "camera_model", "se3")
+        if camera_model == "se3" and (extrinsics is None or intrinsics is None) and getattr(self.cfg, "use_depth_for_camera", True):
+            try:
+                extrinsics, intrinsics, diagnostics = estimate_se3_from_flow_depth(
+                    depth=depth,
+                    flow_fwd=flow_fwd,
+                    flow_bwd=flow_bwd,
+                    intrinsics=getattr(self.cfg, "intrinsics", None),
+                    stride=getattr(self.cfg, "se3_sample_stride", 8),
+                    ransac_threshold=getattr(self.cfg, "se3_ransac_threshold", 3.0),
+                )
+            except Exception as exc:
+                diagnostics = {"se3_estimator": "failed", "se3_error": str(exc)}
+
+        # Extract camera motion: pose (DA3 or robust RGB-D flow PnP) when available, else homography.
+        use_pose = camera_model == "se3" and extrinsics is not None and intrinsics is not None
         if use_pose:
             cam_fwd, cam_bwd = pose_to_motion_field(extrinsics, intrinsics, depth, eps=1e-4)
         else:
@@ -154,6 +172,7 @@ class SIN3DEngine:
         params._camera_flow_fwd = cam_fwd
         params._camera_flow_bwd = cam_bwd
         params._camera_from_pose = use_pose  # Fix (3): z_scale only when SE(3)+depth
+        params._camera_model_used = "se3" if use_pose else "homography_or_flow_fallback"
         params.rs_y0 = getattr(self.cfg, "rs_y0", 0.0)
         params.object_residual_max_norm = getattr(self.cfg, "object_residual_max_norm", 2.0)
         
@@ -231,6 +250,10 @@ class SIN3DEngine:
             "traj": traj,
             "visibility": visibility,
             "params": params,
+            "camera_model": params._camera_model_used,
+            "camera_diagnostics": diagnostics,
+            "intrinsics": intrinsics,
+            "extrinsics": extrinsics,
             "cam_traj": cam_traj,
             "obj_traj": obj_traj,
             "cam_fwd": cam_fwd,

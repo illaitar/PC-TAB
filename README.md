@@ -1,82 +1,45 @@
-# PC-TABD / PC-TAB
-**Physically Consistent Trajectory-Aware Blur**: a physically grounded motion-blur synthesis pipeline and a trajectory-aware dataset.
+# PC-TAB and PC-TABD
 
-## Timeline
+**PC-TAB** is a physically controllable framework for motion blur synthesis. It turns ordinary sharp video into realistic blurred data and stores the per-pixel motion trajectories that produced each blur.
 
-
----
-
-## Overview
-This repository contains code and materials for **PC-TAB**, a physically grounded motion blur synthesis framework that:
-- approximates the exposure integral **in linear light**,
-- uses **three consecutive sharp frames** as anchors (prev / reference / next),
-- decomposes motion into **camera + object residual**, accounts for **visibility/occlusions**, **rolling-shutter effects**, and a lightweight **ISP simulation** (e.g., noise/clamp).
-
-Built on top of this pipeline, we provide **PC-TABD** — a synthetic blur–sharp dataset with **explicit per-pixel trajectories**, along with auxiliary signals such as depth/flow and generation metadata.
-
----
+**PC-TABD** is the dataset generated with PC-TAB. It contains 21,500 paired blurred videos with sharp references, synthesis-defined trajectories, generation metadata, and train and test splits.
 
 ## Why
-The goal is to reduce the synthetic–real gap when training or fine-tuning deblurring models. Instead of simple frame averaging, we aim to reproduce key factors of real-world blur formation (exposure, trajectory shapes, rolling shutter, occlusions, ISP), while keeping the process controllable and interpretable.
 
----
+Motion blur is a common failure mode for visual models, but paired sharp and blurred data is expensive to capture and often tied to a narrow camera setup. PC-TAB treats blur synthesis as a controllable data engine. It preserves labels while changing only image appearance, so the same source data can train models that are more robust to real motion blur.
 
-## Dataset link
-**PC-TABD dataset (Yandex Disk):**  
-**https://disk.yandex.ru/d/ZWUnAKowUmQSzg**
+## Method
 
-> This link points to the dataset download (archives / folder structure with blur–sharp pairs, trajectories, and metadata).
+PC-TAB starts from sharp video triplets, separates global camera motion from object residual motion, samples interpretable physical factors, and integrates exposure in linear light. The pipeline also models visibility, occlusions, rolling shutter, sensor noise, nonlinear response, and sharpening.
 
----
+The framework can be used for on-the-fly augmentation or for generating a fixed benchmark dataset. In the paper, PC-TAB improves six deblurring architectures on GoPro and REDS, transfers to RealBlur-J and RealBlur-R, and improves object detection under real motion blur on BDD100K.
 
-## Repository structure (high-level)
-> Folder names may slightly differ; below is the intended “mental map”.
+## Dataset
 
-- `pc_tab/` — core synthesis library (trajectories → visibility → integration → ISP)
-- `configs/` — YAML/JSON configs for generation/experiments
-- `scripts/`
-  - `generate_dataset.py` — generate PC-TABD samples
-  - `augment_train.py` — on-the-fly augmentation during training
-  - `evaluate.py` — evaluation / metrics runner
-- `third_party/` — external dependencies / wrappers (e.g., flow/depth tools)
-- `docs/` — notes, figures, additional materials
-- `assets/` — README images
-- `data/` — (optional) place for dataset symlinks/caches (do not commit large files)
+Dataset: https://huggingface.co/datasets/Illaitar/PC-TABD
 
----
+Code: https://github.com/illaitar/PC-TABD
 
 ## Quickstart
 
-### 1) Installation
+Install the repository dependencies:
+
 ```bash
 git clone https://github.com/illaitar/PC-TABD
 cd PC-TABD
-
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2) Download the dataset
-Download from the Yandex Disk link and unpack, e.g. into `./data/pc_tabd/`:
-```bash
-mkdir -p data/pc_tabd
-# unzip / tar / etc.
-```
+Download PC-TABD from Hugging Face and place it under `data/pc_tabd`.
 
-### 3) Generate blur samples (example)
-```bash
-python scripts/generate_dataset.py \
-  --config configs/pc_tabd.yaml \
-  --out data/pc_tabd_generated
-```
+## Repository Layout
 
----
+`pc-tab` contains the core synthesis code for trajectories, visibility, shutter integration, ISP modeling, and camera motion estimation.
 
-## Citation
-TODO
-
----
+`scripts` contains helper scripts for GoPro processing, optical flow and depth precomputation, runtime checks, and trajectory analysis.
 
 ## License
-This project is licensed under **Creative Commons Attribution–NonCommercial 4.0 International (CC BY-NC 4.0)**.
+
+This project is licensed under **Creative Commons Attribution 4.0 International**.

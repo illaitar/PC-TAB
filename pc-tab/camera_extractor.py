@@ -3,6 +3,7 @@
 - Extracts camera motion via homography from 3 sharp frames
 - Extracts object masks by thresholding residual flow (flow - camera_motion)
 - pose_to_motion_field: SE(3) + depth -> camera flow (for DA3 extrinsics + intrinsics)
+- estimate_se3_from_flow_depth: robust RGB-D pose from MEMFOF flow + depth
 """
 
 import torch
@@ -207,6 +208,177 @@ def homography_to_motion_field(
     return motion_field
 
 
+def make_intrinsics(
+    H_img: int,
+    W_img: int,
+    intrinsics: Optional[Union[Tuple[float, float, float, float], torch.Tensor, np.ndarray]] = None,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Create a pinhole intrinsic matrix.
+
+    If no calibration is supplied, use a conservative GoPro-like approximation:
+    focal length equals the larger image side and principal point is centered.
+    """
+
+    if intrinsics is None:
+        fx = fy = float(max(H_img, W_img))
+        cx = (W_img - 1.0) * 0.5
+        cy = (H_img - 1.0) * 0.5
+        K = torch.tensor([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=dtype)
+    elif isinstance(intrinsics, tuple):
+        fx, fy, cx, cy = intrinsics
+        K = torch.tensor([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=dtype)
+    elif isinstance(intrinsics, np.ndarray):
+        K = torch.from_numpy(intrinsics).to(dtype=dtype)
+    else:
+        K = intrinsics.to(dtype=dtype)
+    if device is not None:
+        K = K.to(device=device)
+    return K
+
+
+def _estimate_relative_pose_pnp(
+    flow: torch.Tensor,
+    depth: torch.Tensor,
+    K: torch.Tensor,
+    stride: int = 8,
+    ransac_threshold: float = 3.0,
+    confidence: float = 0.999,
+    max_iters: int = 5000,
+) -> Tuple[torch.Tensor, int, float]:
+    """Estimate center->target camera transform from center depth and target flow."""
+
+    if not HAS_CV2:
+        raise ImportError("OpenCV (cv2) is required for SE(3) estimation")
+
+    device = depth.device
+    dtype = depth.dtype
+    if depth.dim() == 4:
+        depth_2d = depth[0, 0]
+    elif depth.dim() == 3:
+        depth_2d = depth[0]
+    else:
+        depth_2d = depth
+
+    if flow.dim() == 4:
+        flow_hw = flow[0].permute(1, 2, 0)
+    elif flow.dim() == 3 and flow.shape[0] == 2:
+        flow_hw = flow.permute(1, 2, 0)
+    else:
+        flow_hw = flow
+
+    H_img, W_img = depth_2d.shape
+    yy, xx = torch.meshgrid(
+        torch.arange(0, H_img, stride, device=device, dtype=dtype),
+        torch.arange(0, W_img, stride, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    yy_i = yy.long().flatten()
+    xx_i = xx.long().flatten()
+    z = depth_2d[yy_i, xx_i]
+    uv_flow = flow_hw[yy_i, xx_i]
+    valid = torch.isfinite(z) & torch.isfinite(uv_flow).all(dim=1) & (z > 1e-4)
+    if valid.sum() < 12:
+        E = torch.eye(3, 4, device=device, dtype=dtype)
+        return E, 0, float("inf")
+
+    xx_v = xx_i[valid].to(dtype)
+    yy_v = yy_i[valid].to(dtype)
+    z_v = z[valid]
+    flow_v = uv_flow[valid]
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    X = (xx_v - cx) / fx * z_v
+    Y = (yy_v - cy) / fy * z_v
+    object_points = torch.stack([X, Y, z_v], dim=1).detach().cpu().numpy().astype(np.float32)
+    image_points = torch.stack([xx_v + flow_v[:, 0], yy_v + flow_v[:, 1]], dim=1).detach().cpu().numpy().astype(np.float32)
+    K_np = K.detach().cpu().numpy().astype(np.float64)
+
+    ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+        object_points,
+        image_points,
+        K_np,
+        None,
+        iterationsCount=max_iters,
+        reprojectionError=ransac_threshold,
+        confidence=confidence,
+        flags=cv2.SOLVEPNP_EPNP,
+    )
+    if not ok or inliers is None or len(inliers) < 12:
+        E = torch.eye(3, 4, device=device, dtype=dtype)
+        return E, 0, float("inf")
+
+    # Refine on inliers where available.
+    try:
+        inlier_idx = inliers.reshape(-1)
+        rvec, tvec = cv2.solvePnPRefineLM(
+            object_points[inlier_idx],
+            image_points[inlier_idx],
+            K_np,
+            None,
+            rvec,
+            tvec,
+        )
+    except Exception:
+        pass
+
+    R, _ = cv2.Rodrigues(rvec)
+    E_np = np.concatenate([R, tvec.reshape(3, 1)], axis=1).astype(np.float32)
+    projected, _ = cv2.projectPoints(object_points[inliers.reshape(-1)], rvec, tvec, K_np, None)
+    err = np.linalg.norm(projected.reshape(-1, 2) - image_points[inliers.reshape(-1)], axis=1)
+    E = torch.from_numpy(E_np).to(device=device, dtype=dtype)
+    return E, int(len(inliers)), float(np.median(err))
+
+
+def estimate_se3_from_flow_depth(
+    depth: torch.Tensor,
+    flow_fwd: torch.Tensor,
+    flow_bwd: torch.Tensor,
+    intrinsics: Optional[Union[Tuple[float, float, float, float], torch.Tensor, np.ndarray]] = None,
+    stride: int = 8,
+    ransac_threshold: float = 3.0,
+) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    """Estimate prev/center/next OpenCV-style extrinsics from MEMFOF flows.
+
+    The centre camera is identity. Prev and next are robust PnP estimates using
+    centre-frame 3D points from depth and target 2D correspondences from flow.
+    """
+
+    if depth.dim() == 3:
+        depth_b = depth.unsqueeze(0)
+    else:
+        depth_b = depth
+    _, _, H_img, W_img = depth_b.shape
+    K = make_intrinsics(H_img, W_img, intrinsics, device=depth_b.device, dtype=depth_b.dtype)
+    E_center = torch.eye(3, 4, device=depth_b.device, dtype=depth_b.dtype)
+    E_next, inliers_next, err_next = _estimate_relative_pose_pnp(
+        flow_fwd,
+        depth_b,
+        K,
+        stride=stride,
+        ransac_threshold=ransac_threshold,
+    )
+    E_prev, inliers_prev, err_prev = _estimate_relative_pose_pnp(
+        flow_bwd,
+        depth_b,
+        K,
+        stride=stride,
+        ransac_threshold=ransac_threshold,
+    )
+    extrinsics = torch.stack([E_prev, E_center, E_next], dim=0)
+    diagnostics = {
+        "se3_estimator": "pnp_ransac_from_flow_depth",
+        "se3_stride": stride,
+        "se3_ransac_threshold": ransac_threshold,
+        "se3_inliers_prev": inliers_prev,
+        "se3_inliers_next": inliers_next,
+        "se3_median_reproj_prev": err_prev,
+        "se3_median_reproj_next": err_next,
+    }
+    return extrinsics, K, diagnostics
+
+
 def pose_to_motion_field(
     extrinsics: Union[torch.Tensor, np.ndarray],  # [3, 3, 4] prev, center, next (OpenCV w2c)
     intrinsics: Union[torch.Tensor, np.ndarray],  # [3, 3] K for center
@@ -238,8 +410,10 @@ def pose_to_motion_field(
     extrinsics = extrinsics.to(device=device, dtype=dtype)
     intrinsics = intrinsics.to(device=device, dtype=dtype)
 
-    if depth.dim() == 3:
-        depth = depth.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+    if depth.dim() == 2:
+        depth = depth.unsqueeze(0).unsqueeze(0)
+    elif depth.dim() == 3:
+        depth = depth.unsqueeze(0) if depth.shape[0] == 1 else depth.unsqueeze(1)
     elif depth.dim() == 4 and depth.shape[1] != 1:
         depth = depth[:, :1]
 

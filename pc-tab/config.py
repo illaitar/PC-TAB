@@ -56,10 +56,12 @@ class SIN3DConfig:
     # Depth-dependent scaling
     depth_parallax_scale: Tuple[float, float] = (0.5, 2.0)
     
-    # P2: Camera model (homography fallback vs SE(3)+depth)
-    camera_model: str = "homography"  # "homography" | "se3"
-    use_depth_for_camera: bool = False
+    # P2: Camera model (SE(3)+depth by default; homography remains fallback)
+    camera_model: str = "se3"  # "se3" | "homography"
+    use_depth_for_camera: bool = True
     intrinsics: Optional[Tuple[float, float, float, float]] = None  # (fx, fy, cx, cy); None -> approx
+    se3_sample_stride: int = 8
+    se3_ransac_threshold: float = 3.0
     
     # RS convention: y0 for dt(y) = rs_factor * shutter_length * (y - y0) / H
     rs_y0: float = 0.0  # 0 = top; use 0.5 for center (H/2)
@@ -68,7 +70,7 @@ class SIN3DConfig:
     object_residual_max_norm: float = 2.0  # pixels
 
     # Fix (2): True z-buffer via forward-splat zmin (many-to-one). Default False = min-over-time.
-    use_forward_splat_visibility: bool = False
+    use_forward_splat_visibility: bool = True
 
     # Min visibility floor to avoid black borders at depth edges (bilinear warp mixes fg/bg → thin band vis≈0). Default 0.12.
     visibility_floor: float = 0.12
@@ -79,6 +81,7 @@ class SIN3DConfig:
     # P6: Trajectory profile (constant | acceleration | smooth_walk); invertible.
     trajectory_profile: str = "constant"  # "constant" | "acceleration" | "smooth_walk"
     camera_acceleration: Tuple[float, float] = (0.0, 0.05)  # a in disp = v*t + 0.5*a*t^2
+    lateral_acceleration: Tuple[float, float] = (0.0, 0.0)  # perpendicular acceleration for curved paths
     smooth_walk_jerk: Tuple[float, float] = (0.0, 0.02)  # jerk limit for integrated noise
 
     device: str = "cuda"
@@ -106,6 +109,7 @@ class SIN3DConfig:
             depth_parallax_scale=np.random.uniform(*self.depth_parallax_scale),
             trajectory_profile=self.trajectory_profile,
             camera_acceleration=np.random.uniform(*self.camera_acceleration),
+            lateral_acceleration=np.random.uniform(*self.lateral_acceleration),
             smooth_walk_jerk=np.random.uniform(*self.smooth_walk_jerk),
             device=self.device,
         )
@@ -134,6 +138,7 @@ class SIN3DParams:
     depth_parallax_scale: float
     trajectory_profile: str
     camera_acceleration: float
+    lateral_acceleration: float
     smooth_walk_jerk: float
     device: str
     

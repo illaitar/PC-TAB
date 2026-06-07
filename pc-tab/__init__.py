@@ -14,6 +14,8 @@ from .visibility import compute_visibility
 from .camera_extractor import (
     extract_homography_from_frames,
     homography_to_motion_field,
+    estimate_se3_from_flow_depth,
+    make_intrinsics,
     pose_to_motion_field,
     extract_object_masks_from_residual,
 )
@@ -37,6 +39,8 @@ __all__ = [
     "compute_visibility",
     "extract_homography_from_frames",
     "homography_to_motion_field",
+    "estimate_se3_from_flow_depth",
+    "make_intrinsics",
     "pose_to_motion_field",
     "extract_object_masks_from_residual",
     "cycle_consistency_loss",
